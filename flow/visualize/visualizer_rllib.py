@@ -13,16 +13,12 @@ parser : ArgumentParser
 """
 
 import argparse
-import numpy as np
 import os
 
-import ray
-from ray.rllib.agent import get_agent_class
-from ray.tune.registry import get_registry, register_env
-
-from flow.utils.registry import make_create_env
 from flow.utils.rllib import get_flow_params, get_rllib_config
+from flow.utils.evaluate import get_compute_action_rllib
 from flow.core.util import emission_to_csv
+from flow.core.experiment import SumoExperiment
 
 EXAMPLE_USAGE = """
 example usage:
@@ -59,27 +55,17 @@ parser.add_argument('--emission_to_csv', action='store_true',
 if __name__ == "__main__":
     args = parser.parse_args()
 
+    compute_action = get_compute_action_rllib(
+        path_to_dir=args.result_dir,
+        checkpoint_num=args.checkpoint_num,
+        alg=args.run
+    )
+
+    # Collect the config data from the RLlib serialized files
     result_dir = args.result_dir if args.result_dir[-1] != '/' \
         else args.result_dir[:-1]
-
     config = get_rllib_config(result_dir)
-
-    # Run on only one cpu for rendering purposes
-    ray.init(num_cpus=1)
-    config["num_workers"] = 1
-
     flow_params = get_flow_params(config)
-
-    # Create and register a gym+rllib env
-    create_env, env_name = make_create_env(params=flow_params,
-                                           version=0,
-                                           sumo_binary="sumo")
-    register_env(env_name, create_env)
-
-    agent_cls = get_agent_class(args.run)
-    agent = agent_cls(env=env_name, registry=get_registry(), config=config)
-    checkpoint = result_dir + '/checkpoint-' + args.checkpoint_num
-    agent._restore(checkpoint)
 
     # Recreate the scenario from the pickled parameters
     exp_tag = flow_params["exp_tag"]
@@ -112,23 +98,10 @@ if __name__ == "__main__":
 
     # Run the environment in the presence of the pre-trained RL agent for the
     # requested number of time steps / rollouts
-    rets = []
-    for i in range(args.num_rollouts):
-        state = env.reset()
-        done = False
-        ret = 0
-        for _ in range(env_params.horizon):
-            action = agent.compute_action(state)
-            state, reward, done, _ = env.step(action)
-            ret += reward
-            if done:
-                break
-        rets.append(ret)
-        print("Return:", ret)
-    print("Average, std return: {}, {}".format(np.mean(rets), np.std(rets)))
-
-    # terminate the environment
-    env.terminate()
+    exp = SumoExperiment(env=env, scenario=scenario)
+    exp.run(num_runs=args.num_rollouts,
+            num_steps=env.horizon,
+            rl_actions=compute_action)
 
     # if prompted, convert the emission file into a csv file
     if args.emission_to_csv:
